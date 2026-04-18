@@ -1,0 +1,8 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+output/
+第一批采集结果（源于重疾险1.zip）/
+
+model_config.py

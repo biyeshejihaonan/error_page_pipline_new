@@ -1,0 +1,2 @@
+"""MinerU artifact adapters."""
+

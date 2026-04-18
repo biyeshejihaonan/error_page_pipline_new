@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rate-table-repair"
+version = "0.1.0"
+description = "MinerU-based targeted repair framework for rate table HTML correction"
+requires-python = ">=3.9"
+dependencies = [
+    "beautifulsoup4>=4.13,<5",
+    "openai>=1.30,<2",
+    "pydantic>=1.10,<3",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
