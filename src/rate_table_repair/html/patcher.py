@@ -1,3 +1,4 @@
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 
@@ -46,17 +47,39 @@ class HtmlPatcher:
         column_index, cell = matches[0]
         return table_index, row_index, column_index, cell
 
+    @staticmethod
+    def _has_explicit_target(patch: PatchInstruction) -> bool:
+        location = patch.target_location
+        return any(
+            value is not None and value != ""
+            for value in (
+                location.row_index,
+                location.column_index,
+                location.row_context,
+                location.column_context,
+            )
+        )
+
     def apply(self, plan: PatchPlan, output_html_path: Path) -> PatchResult:
         if not plan.should_modify:
-            return PatchResult(case_name=plan.case_name, modified=False, message="Patch plan 不允许自动修改。")
+            reason = plan.reason or "未生成可执行 patch"
+            return PatchResult(case_name=plan.case_name, modified=False, message="不允许自动修改：%s" % reason)
 
-        html_text = plan.html_path.read_text(encoding="utf-8")
+        source_html_path = output_html_path if output_html_path.exists() else plan.html_path
+        html_text = source_html_path.read_text(encoding="utf-8")
         soup = BeautifulSoup(html_text, "html.parser")
         section = find_page_section(soup, plan.page_number)
         if section is None:
             return PatchResult(case_name=plan.case_name, modified=False, message="未找到目标页。")
 
-        patches = plan.patches or [PatchInstruction(target_location=plan.target_location, correction=plan.correction, reason=plan.reason)]
+        source_patches = plan.patches or [
+            PatchInstruction(
+                target_location=deepcopy(plan.target_location),
+                correction=deepcopy(plan.correction),
+                reason=plan.reason,
+            )
+        ]
+        patches = [deepcopy(patch) for patch in source_patches]
         resolved = []
         for patch in patches:
             table_index, row_index, column_index, cell = self._resolve_patch(section, patch)
@@ -65,7 +88,7 @@ class HtmlPatcher:
 
             current_value = cell.get_text(strip=True)
             expected = patch.correction.from_value
-            if expected is not None and current_value != expected:
+            if expected is not None and current_value != expected and not self._has_explicit_target(patch):
                 relocated_table_index, relocated_row_index, relocated_column_index, relocated_cell = self._relocate_by_expected_value(
                     section,
                     table_index,
@@ -80,11 +103,15 @@ class HtmlPatcher:
                     current_value = cell.get_text(strip=True)
 
             if expected is not None and current_value != expected:
-                return PatchResult(
-                    case_name=plan.case_name,
-                    modified=False,
-                    message="当前值 %s 与预期旧值 %s 不一致，拒绝修改。" % (current_value, expected),
-                )
+                if self._has_explicit_target(patch):
+                    # 模型已明确定位目标单元格时，优先修改该格子，避免仅因 from 值偏差而重定位到错误位置。
+                    patch.correction.from_value = current_value
+                else:
+                    return PatchResult(
+                        case_name=plan.case_name,
+                        modified=False,
+                        message="当前值 %s 与预期旧值 %s 不一致，拒绝修改。" % (current_value, expected),
+                    )
             resolved.append((patch, table_index, row_index, column_index, cell, current_value))
 
         for patch, table_index, row_index, column_index, cell, current_value in resolved:
@@ -92,10 +119,6 @@ class HtmlPatcher:
             patch.target_location.table_index = table_index
             patch.target_location.row_index = row_index
             patch.target_location.column_index = column_index
-
-        if resolved:
-            plan.target_location = resolved[0][0].target_location
-            plan.correction = resolved[0][0].correction
 
         output_html_path.parent.mkdir(parents=True, exist_ok=True)
         output_html_path.write_text(str(soup), encoding="utf-8")

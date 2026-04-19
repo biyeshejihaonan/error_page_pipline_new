@@ -1,7 +1,7 @@
 from typing import List
 
 from rate_table_repair.schemas.report import DocumentCase, PageIssue
-from rate_table_repair.scanners.report_loader import load_old_issue_summary
+from rate_table_repair.scanners.report_loader import load_old_issue_hints, load_old_issue_summary
 
 
 def build_issue(document_case: DocumentCase, page_number: int) -> PageIssue:
@@ -23,6 +23,7 @@ def build_issue(document_case: DocumentCase, page_number: int) -> PageIssue:
         mineru_page_dir=mineru_page_dir if mineru_page_dir.exists() else None,
         split_page_pdf=split_pdf if split_pdf.exists() else None,
         old_issue_summary=load_old_issue_summary(result_path),
+        old_issue_hints=load_old_issue_hints(result_path),
     )
 
 

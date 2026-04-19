@@ -16,6 +16,7 @@ from rate_table_repair.scanners.issue_selector import build_issue, select_issues
 from rate_table_repair.scanners.project_scanner import scan_cases
 from rate_table_repair.scanners.report_loader import load_verification_summary
 from rate_table_repair.schemas.patch import FalsePositiveItem, NeedsReviewItem, PatchResult
+from rate_table_repair.schemas.review import FinalJudgeResult, ReviewResult
 
 
 class RepairPipeline:
@@ -42,6 +43,8 @@ class RepairPipeline:
         self.evidence_builder = EvidenceBuilder(
             MineruAdapter(),
             self.audit_writer.evidence_dir / "rendered_pages",
+            self.audit_writer.evidence_dir / "table_crops",
+            self.audit_writer.evidence_dir / "row_crops",
         )
 
     def _load_selection(self, selection_file: Optional[Path]) -> Optional[Set[Tuple[str, int]]]:
@@ -84,25 +87,47 @@ class RepairPipeline:
                 issue_count += 1
 
                 evidence = self.evidence_builder.build(issue)
-                primary = self.primary_reviewer.review(evidence)
-                peer = self.peer_reviewer.review(evidence, primary)
-                final_judge = self.final_judge.review(evidence, primary, peer)
                 linked_patch = None
-                patch_plan = build_patch_plan(issue, final_judge)
-                if (
-                    not patch_plan.should_modify
-                    and final_judge.final_decision != "false_positive"
-                    and primary.is_real_error
-                    and peer.is_real_error
-                ):
-                    linked_patch = self.linked_patch_resolver.review(evidence, primary, peer, final_judge)
-                    patch_plan = build_patch_plan(
-                        issue,
-                        final_judge,
-                        primary=primary,
-                        peer=peer,
-                        linked_patch=linked_patch,
+                try:
+                    primary = self.primary_reviewer.review(evidence)
+                    evidence = self.evidence_builder.enrich_with_review_crops(evidence, [primary])
+                    peer = self.peer_reviewer.review(evidence, primary)
+                    evidence = self.evidence_builder.enrich_with_review_crops(evidence, [primary, peer])
+                    final_judge = self.final_judge.review(evidence, primary, peer)
+                    patch_plan = build_patch_plan(issue, final_judge)
+                    if (
+                        not patch_plan.should_modify
+                        and final_judge.final_decision != "false_positive"
+                        and primary.is_real_error
+                        and peer.is_real_error
+                    ):
+                        linked_patch = self.linked_patch_resolver.review(evidence, primary, peer, final_judge)
+                        patch_plan = build_patch_plan(
+                            issue,
+                            final_judge,
+                            primary=primary,
+                            peer=peer,
+                            linked_patch=linked_patch,
+                        )
+                except Exception as exc:
+                    primary = ReviewResult(
+                        role="primary_reviewer",
+                        model_name=str(self.primary_reviewer.model_config["name"]),
+                        reason="模型调用失败，未完成主审",
                     )
+                    peer = ReviewResult(
+                        role="peer_reviewer",
+                        model_name=str(self.peer_reviewer.model_config["name"]),
+                        reason="模型调用失败，未完成互评",
+                    )
+                    final_judge = FinalJudgeResult(
+                        role="final_judge",
+                        model_name=str(self.final_judge.model_config["name"]),
+                        final_decision="needs_review",
+                        should_modify_html=False,
+                        reason=f"模型调用失败：{exc}",
+                    )
+                    patch_plan = build_patch_plan(issue, final_judge)
 
                 output_html_path = self.audit_writer.corrected_dir / issue.case_name / issue.html_path.name
                 patch_result = self.html_patcher.apply(patch_plan, output_html_path)

@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class VerificationSummary(BaseModel):
@@ -27,6 +27,15 @@ class DocumentCase(BaseModel):
         arbitrary_types_allowed = True
 
 
+class OldIssueHint(BaseModel):
+    text: str
+    row_context: Optional[str] = None
+    column_index: Optional[int] = None
+    column_context: Optional[str] = None
+    current_value: Optional[str] = None
+    correct_value: Optional[str] = None
+
+
 class PageIssue(BaseModel):
     case_name: str
     case_dir: Path
@@ -37,6 +46,7 @@ class PageIssue(BaseModel):
     mineru_page_dir: Optional[Path] = None
     split_page_pdf: Optional[Path] = None
     old_issue_summary: Optional[str] = None
+    old_issue_hints: List[OldIssueHint] = Field(default_factory=list)
 
     class Config:
         arbitrary_types_allowed = True

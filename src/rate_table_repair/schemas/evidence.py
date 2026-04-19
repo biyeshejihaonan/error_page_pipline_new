@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from pydantic import BaseModel
+from rate_table_repair.schemas.report import OldIssueHint
 
 
 class MineruTableEvidence(BaseModel):
@@ -27,9 +28,12 @@ class EvidencePackage(BaseModel):
     html_path: Path
     split_page_pdf: Optional[Path]
     rendered_page_image: Optional[Path]
+    table_crop_images: List[Path]
+    row_crop_images: List[Path]
     mineru_page_dir: Optional[Path]
     verification_result_path: Optional[Path]
     old_issue_summary: Optional[str]
+    old_issue_hints: List[OldIssueHint]
     html_page_context: HtmlPageContext
     mineru_tables: List[MineruTableEvidence]
 

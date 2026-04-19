@@ -4,9 +4,9 @@ from typing import Dict, List
 
 
 ROLE_DEFAULTS = {
-    "primary_reviewer": "qwen3-vl-235b-a22b-instruct",
-    "peer_reviewer": "abab6.5-chat",
-    "final_judge": "gemini-2.5-flash",
+    "primary_reviewer": "glm-5",
+    "peer_reviewer": "gemini-2.5-flash",
+    "final_judge": "qwen3-vl-235b-a22b-instruct",
 }
 
 

@@ -26,14 +26,14 @@ class LinkedPatchResolver:
             rows = table.find_all("tr")
             for row_index, row in enumerate(rows):
                 cells = [cell.get_text(strip=True) for cell in row.find_all(["td", "th"])]
-                if cells and cells[0] == row_context:
-                    start = max(0, row_index - 2)
-                    end = min(len(rows), row_index + 3)
+                if cells and row_context in cells:
+                    start = max(0, row_index - 4)
+                    end = min(len(rows), row_index + 5)
                     rows_text.append("候选表格 %s / 行 %s" % (table_index, row_index))
                     for ctx_index in range(start, end):
                         ctx_cells = [cell.get_text(strip=True) for cell in rows[ctx_index].find_all(["td", "th"])]
                         rows_text.append("row[%s]=%s" % (ctx_index, ctx_cells))
-        return "\n".join(rows_text[:40])
+        return "\n".join(rows_text[:120])
 
     def review(
         self,
@@ -53,10 +53,28 @@ class LinkedPatchResolver:
         assert self.client is not None
         row_context = primary_result.target_location.row_context or peer_result.target_location.row_context or ""
         candidate_rows = self._build_candidate_rows(evidence, row_context) if row_context else ""
+        primary_payload = dict(primary_result.raw_json or {})
+        if primary_result.reason:
+            primary_payload.setdefault("reason", primary_result.reason)
+        if primary_result.raw_text:
+            primary_payload["raw_text"] = primary_result.raw_text
+
+        peer_payload = dict(peer_result.raw_json or {})
+        if peer_result.reason:
+            peer_payload.setdefault("reason", peer_result.reason)
+        if peer_result.raw_text:
+            peer_payload["raw_text"] = peer_result.raw_text
+
+        final_payload = dict(final_judge.raw_json or {})
+        if final_judge.reason:
+            final_payload.setdefault("reason", final_judge.reason)
+        if final_judge.raw_text:
+            final_payload["raw_text"] = final_judge.raw_text
+
         extra = "主审结果：\n%s\n\n互评结果：\n%s\n\n最终裁决结果：\n%s" % (
-            json.dumps(primary_result.raw_json or {"reason": primary_result.reason}, ensure_ascii=False, indent=2),
-            json.dumps(peer_result.raw_json or {"reason": peer_result.reason}, ensure_ascii=False, indent=2),
-            json.dumps(final_judge.raw_json or {"reason": final_judge.reason, "raw_text": final_judge.raw_text}, ensure_ascii=False, indent=2),
+            json.dumps(primary_payload, ensure_ascii=False, indent=2),
+            json.dumps(peer_payload, ensure_ascii=False, indent=2),
+            json.dumps(final_payload, ensure_ascii=False, indent=2),
         )
         if candidate_rows:
             extra += "\n\n【候选行上下文】\n%s" % candidate_rows
@@ -64,9 +82,9 @@ class LinkedPatchResolver:
             PROMPT_PATH,
             evidence,
             extra_text=extra,
-            html_limit=2500,
-            table_limit=0,
-            max_tables=0,
+            html_limit=24000,
+            table_limit=6000,
+            max_tables=2,
         )
         raw_text = ""
         raw_json = {}
