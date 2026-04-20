@@ -52,14 +52,3 @@ class FinalJudgeResult(BaseModel):
     basis: Dict[str, Any] = Field(default_factory=dict)
     raw_text: str = ""
     raw_json: Dict[str, Any] = Field(default_factory=dict)
-
-
-class LinkedPatchResult(BaseModel):
-    role: str
-    model_name: str
-    should_modify_html: bool = False
-    confidence: str = "unknown"
-    reason: str = ""
-    patches: List[PatchInstruction] = Field(default_factory=list)
-    raw_text: str = ""
-    raw_json: Dict[str, Any] = Field(default_factory=dict)

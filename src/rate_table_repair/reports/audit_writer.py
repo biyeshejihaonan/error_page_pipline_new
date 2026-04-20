@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from rate_table_repair.schemas.patch import FalsePositiveItem, NeedsReviewItem, PatchPlan, PatchResult
-from rate_table_repair.schemas.review import FinalJudgeResult, LinkedPatchResult, ReviewResult
+from rate_table_repair.schemas.review import FinalJudgeResult, ReviewResult
 
 
 class AuditWriter:
@@ -17,10 +17,40 @@ class AuditWriter:
         self.corrected_dir.mkdir(parents=True, exist_ok=True)
 
     @staticmethod
-    def _effective_final_decision(final_judge: FinalJudgeResult, patch_result: PatchResult) -> str:
+    def _short_model_name(name: Optional[str]) -> str:
+        text = (name or "").lower()
+        if "qwen" in text:
+            return "qwen"
+        if "gemini" in text:
+            return "gemini"
+        if "glm" in text:
+            return "glm"
+        return name or "unknown"
+
+    @staticmethod
+    def _display_source_name(
+        source: Optional[str],
+        primary_model_name: Optional[str],
+        peer_model_name: Optional[str],
+        final_model_name: Optional[str],
+    ) -> str:
+        if source == "primary":
+            return AuditWriter._short_model_name(primary_model_name)
+        if source == "peer":
+            return AuditWriter._short_model_name(peer_model_name)
+        if source == "final_judge":
+            return AuditWriter._short_model_name(final_model_name)
+        return source or "unknown"
+
+    @staticmethod
+    def _effective_final_decision(
+        final_judge: FinalJudgeResult,
+        patch_result: PatchResult,
+        patch_plan: Optional[PatchPlan] = None,
+    ) -> str:
         if patch_result.modified:
             return "modify"
-        if final_judge.final_decision == "false_positive":
+        if patch_plan is not None and patch_plan.classification == "false_positive":
             return "false_positive"
         return "needs_review"
 
@@ -33,8 +63,12 @@ class AuditWriter:
         return "❓ 不确定"
 
     @staticmethod
-    def _final_status_text(final_judge: FinalJudgeResult, patch_result: PatchResult) -> str:
-        effective = AuditWriter._effective_final_decision(final_judge, patch_result)
+    def _final_status_text(
+        final_judge: FinalJudgeResult,
+        patch_result: PatchResult,
+        patch_plan: Optional[PatchPlan] = None,
+    ) -> str:
+        effective = AuditWriter._effective_final_decision(final_judge, patch_result, patch_plan)
         if effective == "modify":
             return "✅ 已自动修正"
         if effective == "false_positive":
@@ -78,18 +112,73 @@ class AuditWriter:
 
     @staticmethod
     def _format_final_detail(
+        primary: ReviewResult,
+        peer: ReviewResult,
         final_judge: FinalJudgeResult,
-        linked_patch: Optional[LinkedPatchResult],
         patch_plan: PatchPlan,
         patch_result: PatchResult,
     ) -> str:
-        effective = AuditWriter._effective_final_decision(final_judge, patch_result)
+        effective = AuditWriter._effective_final_decision(final_judge, patch_result, patch_plan)
         lines = [
-            "【最终状态】%s" % AuditWriter._final_status_text(final_judge, patch_result),
+            "【最终状态】%s" % AuditWriter._final_status_text(final_judge, patch_result, patch_plan),
             "【有效结论】%s" % effective,
-            "【模型裁决】%s" % final_judge.final_decision,
             "【裁决说明】%s" % (patch_plan.reason or final_judge.reason or "无"),
+            "【分类依据】classification=%s support_votes=%s false_positive_votes=%s"
+            % (patch_plan.classification, patch_plan.support_votes, patch_plan.false_positive_votes),
         ]
+        if patch_plan.selection_source or patch_plan.candidate_scores:
+            lines.append(
+                "【投票选择】source=%s votes=%s"
+                % (
+                    AuditWriter._display_source_name(
+                        patch_plan.selection_source or "无",
+                        primary.model_name,
+                        peer.model_name,
+                        final_judge.model_name,
+                    ),
+                    patch_plan.selection_score,
+                )
+            )
+        if patch_plan.candidate_scores:
+            lines.append("【候选投票】")
+            for index, candidate in enumerate(patch_plan.candidate_scores, start=1):
+                first_patch = candidate.get("first_patch") or {}
+                location = first_patch.get("target_location") or {}
+                correction = first_patch.get("correction") or {}
+                lines.append(
+                    "  %s. source=%s votes=%s confidence=%s patch_count=%s | table=%s row=%s col=%s row_context=%s column_context=%s | %s -> %s | %s"
+                    % (
+                        index,
+                        AuditWriter._display_source_name(
+                            candidate.get("source"),
+                            primary.model_name,
+                            peer.model_name,
+                            final_judge.model_name,
+                        ),
+                        candidate.get("score"),
+                        candidate.get("confidence"),
+                        candidate.get("patch_count"),
+                        location.get("table_index"),
+                        location.get("row_index"),
+                        location.get("column_index"),
+                        location.get("row_context"),
+                        location.get("column_context"),
+                        correction.get("from"),
+                        correction.get("to"),
+                        candidate.get("reason") or "无",
+                    )
+                )
+                vote_details = candidate.get("vote_details") or []
+                for vote_index, vote in enumerate(vote_details, start=1):
+                    lines.append(
+                        "    - vote%s %s: %s | %s"
+                        % (
+                            vote_index,
+                            AuditWriter._short_model_name(vote.get("voter_model")),
+                            vote.get("score"),
+                            vote.get("reason") or "无",
+                        )
+                    )
         if patch_plan.patches:
             lines.append("【修正项】")
             for index, patch in enumerate(patch_plan.patches, start=1):
@@ -125,10 +214,33 @@ class AuditWriter:
                     patch_plan.correction.to_value,
                 )
             )
-        if linked_patch is not None and linked_patch.reason:
-            lines.append("【联动修正说明】%s" % linked_patch.reason)
         lines.append("【执行结果】%s" % patch_result.message)
         return "\n".join(lines)
+
+    @staticmethod
+    def _summary_vote_lines(item: Dict[str, object]) -> List[str]:
+        candidate_scores = item.get("candidate_scores") or []
+        if not candidate_scores:
+            return []
+        lines = ["    评分明细："]
+        for candidate in candidate_scores:
+            lines.append(
+                "    - 候选=%s 投票总分=%s"
+                % (
+                    candidate.get("source_display") or candidate.get("source"),
+                    candidate.get("score"),
+                )
+            )
+            for vote in candidate.get("vote_details") or []:
+                lines.append(
+                    "      %s: %s 分 | %s"
+                    % (
+                        AuditWriter._short_model_name(vote.get("voter_model")),
+                        vote.get("score"),
+                        vote.get("reason") or "无",
+                    )
+                )
+        return lines
 
     def _write_case_text_report(
         self,
@@ -137,7 +249,6 @@ class AuditWriter:
         primary: ReviewResult,
         peer: ReviewResult,
         final_judge: FinalJudgeResult,
-        linked_patch: Optional[LinkedPatchResult],
         patch_plan: PatchPlan,
         patch_result: PatchResult,
     ) -> None:
@@ -147,19 +258,19 @@ class AuditWriter:
             self._final_status_text(final_judge, patch_result),
             "",
             "============================================================",
-            "【主审模型: %s】" % primary.model_name,
+            "【主审模型: %s】" % self._short_model_name(primary.model_name),
             "============================================================",
             self._format_review_detail(primary),
             "",
             "============================================================",
-            "【互评模型: %s】" % peer.model_name,
+            "【互评模型: %s】" % self._short_model_name(peer.model_name),
             "============================================================",
             self._format_review_detail(peer),
             "",
             "============================================================",
             "【最终裁决 / 修正执行】",
             "============================================================",
-            self._format_final_detail(final_judge, linked_patch, patch_plan, patch_result),
+            self._format_final_detail(primary, peer, final_judge, patch_plan, patch_result),
             "",
         ]
         report_path.write_text("\n".join(lines), encoding="utf-8")
@@ -197,7 +308,7 @@ class AuditWriter:
             for item in modified_entries:
                 location = item.get("location") or {}
                 lines.append(
-                    "  - %s 第 %s 页: table=%s row=%s col=%s row_context=%s column_context=%s | %s -> %s | %s"
+                    "  - %s 第 %s 页: table=%s row=%s col=%s row_context=%s column_context=%s | %s -> %s | 评分来源=%s 分数=%s | %s"
                     % (
                         item["case_name"],
                         item["page_number"],
@@ -208,9 +319,12 @@ class AuditWriter:
                         location.get("column_context"),
                         item.get("original_value"),
                         item.get("corrected_value"),
+                        item.get("selection_source_display") or item.get("selection_source"),
+                        item.get("selection_score"),
                         item["reason"],
                     )
                 )
+                lines.extend(self._summary_vote_lines(item))
         else:
             lines.append("  - 无")
         lines.extend(["", "【ℹ️ 旧报告误报的页面】"])
@@ -218,7 +332,7 @@ class AuditWriter:
             for item in false_positive_entries:
                 location = item.get("location") or {}
                 lines.append(
-                    "  - %s 第 %s 页: table=%s row=%s col=%s row_context=%s column_context=%s | 当前值=%s | 误报原因=%s"
+                    "  - %s 第 %s 页: table=%s row=%s col=%s row_context=%s column_context=%s | 当前值=%s | 评分来源=%s 分数=%s | 误报原因=%s"
                     % (
                         item["case_name"],
                         item["page_number"],
@@ -228,9 +342,12 @@ class AuditWriter:
                         location.get("row_context"),
                         location.get("column_context"),
                         item.get("original_value"),
+                        item.get("selection_source_display") or item.get("selection_source"),
+                        item.get("selection_score"),
                         item["reason"],
                     )
                 )
+                lines.extend(self._summary_vote_lines(item))
         else:
             lines.append("  - 无")
         lines.extend(["", "【⚠️ 待人工复核的页面】"])
@@ -238,7 +355,7 @@ class AuditWriter:
             for item in needs_review_entries:
                 location = item.get("location") or {}
                 lines.append(
-                    "  - %s 第 %s 页: table=%s row=%s col=%s row_context=%s column_context=%s | 候选值=%s -> %s | 未修原因=%s"
+                    "  - %s 第 %s 页: table=%s row=%s col=%s row_context=%s column_context=%s | 候选值=%s -> %s | 评分来源=%s 分数=%s | 未修原因=%s"
                     % (
                         item["case_name"],
                         item["page_number"],
@@ -249,9 +366,12 @@ class AuditWriter:
                         location.get("column_context"),
                         item.get("original_value"),
                         item.get("corrected_value"),
+                        item.get("selection_source_display") or item.get("selection_source"),
+                        item.get("selection_score"),
                         item["reason"],
                     )
                 )
+                lines.extend(self._summary_vote_lines(item))
         else:
             lines.append("  - 无")
         summary_path.write_text("\n".join(lines), encoding="utf-8")
@@ -333,7 +453,6 @@ class AuditWriter:
             "case_name": patch_plan.get("case_name"),
             "page_number": patch_plan.get("page_number"),
             "effective_final_decision": effective,
-            "model_final_decision": (payload.get("final_judge") or {}).get("final_decision"),
             "modified": patch_result.get("modified", False),
             "modified_cells": patch_result.get("modified_cells", 0),
             "output_html_path": patch_result.get("output_html_path"),
@@ -342,6 +461,29 @@ class AuditWriter:
             "corrected_value": correction.get("to"),
             "patches": patches,
             "reason": patch_result.get("message") or patch_plan.get("reason") or "",
+            "selection_source": patch_plan.get("selection_source") or "",
+            "selection_source_display": AuditWriter._display_source_name(
+                patch_plan.get("selection_source") or "",
+                (payload.get("primary") or {}).get("model_name"),
+                (payload.get("peer") or {}).get("model_name"),
+                (payload.get("final_judge") or {}).get("model_name"),
+            ),
+            "selection_score": patch_plan.get("selection_score") or 0,
+            "classification": patch_plan.get("classification") or "needs_review",
+            "support_votes": patch_plan.get("support_votes") or 0,
+            "false_positive_votes": patch_plan.get("false_positive_votes") or 0,
+            "candidate_scores": [
+                {
+                    **candidate,
+                    "source_display": AuditWriter._display_source_name(
+                        candidate.get("source"),
+                        (payload.get("primary") or {}).get("model_name"),
+                        (payload.get("peer") or {}).get("model_name"),
+                        (payload.get("final_judge") or {}).get("model_name"),
+                    ),
+                }
+                for candidate in (patch_plan.get("candidate_scores") or [])
+            ],
         }
 
     def write_case_audit(
@@ -351,7 +493,6 @@ class AuditWriter:
         primary: ReviewResult,
         peer: ReviewResult,
         final_judge: FinalJudgeResult,
-        linked_patch: Optional[LinkedPatchResult],
         patch_plan: PatchPlan,
         patch_result: PatchResult,
     ) -> None:
@@ -359,11 +500,10 @@ class AuditWriter:
         case_dir.mkdir(parents=True, exist_ok=True)
         audit_path = case_dir / ("page_%04d_audit.json" % page_number)
         payload: Dict[str, object] = {
-            "effective_final_decision": self._effective_final_decision(final_judge, patch_result),
+            "effective_final_decision": self._effective_final_decision(final_judge, patch_result, patch_plan),
             "primary": primary.dict(by_alias=True),
             "peer": peer.dict(by_alias=True),
             "final_judge": final_judge.dict(by_alias=True),
-            "linked_patch": linked_patch.dict(by_alias=True) if linked_patch is not None else None,
             "patch_plan": patch_plan.dict(by_alias=True),
             "patch_result": patch_result.dict(by_alias=True),
         }
@@ -377,7 +517,6 @@ class AuditWriter:
             primary=primary,
             peer=peer,
             final_judge=final_judge,
-            linked_patch=linked_patch,
             patch_plan=patch_plan,
             patch_result=patch_result,
         )

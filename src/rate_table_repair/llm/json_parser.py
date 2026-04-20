@@ -191,10 +191,3 @@ def normalize_final_judge_json(payload: Dict[str, Any]) -> Dict[str, Any]:
     if normalized.get("basis") is None:
         normalized["basis"] = {}
     return normalized
-
-
-def normalize_linked_patch_json(payload: Dict[str, Any]) -> Dict[str, Any]:
-    normalized = dict(payload)
-    if normalized.get("patches") is None:
-        normalized["patches"] = []
-    return normalized

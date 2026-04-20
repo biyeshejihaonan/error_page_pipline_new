@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
@@ -15,6 +15,12 @@ class PatchPlan(BaseModel):
     correction: Correction
     patches: List[PatchInstruction]
     reason: str
+    selection_source: str = ""
+    selection_score: int = 0
+    classification: str = "needs_review"
+    support_votes: int = 0
+    false_positive_votes: int = 0
+    candidate_scores: List[Dict[str, Any]] = []
 
     class Config:
         arbitrary_types_allowed = True

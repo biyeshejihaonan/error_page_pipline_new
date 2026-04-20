@@ -6,8 +6,8 @@ from rate_table_repair.config.loader import load_model_roles
 from rate_table_repair.decision.rules import build_patch_plan
 from rate_table_repair.evidence.builder import EvidenceBuilder
 from rate_table_repair.html.patcher import HtmlPatcher
+from rate_table_repair.llm.candidate_voter import CandidateVoter
 from rate_table_repair.llm.final_judge import FinalJudge
-from rate_table_repair.llm.linked_patch_resolver import LinkedPatchResolver
 from rate_table_repair.llm.peer_reviewer import PeerReviewer
 from rate_table_repair.llm.primary_reviewer import PrimaryReviewer
 from rate_table_repair.mineru.adapter import MineruAdapter
@@ -37,7 +37,11 @@ class RepairPipeline:
         self.primary_reviewer = PrimaryReviewer(roles["primary_reviewer"], dry_run=dry_run)
         self.peer_reviewer = PeerReviewer(roles["peer_reviewer"], dry_run=dry_run)
         self.final_judge = FinalJudge(roles["final_judge"], dry_run=dry_run)
-        self.linked_patch_resolver = LinkedPatchResolver(roles["final_judge"], dry_run=dry_run)
+        self.candidate_voters = [
+            CandidateVoter(roles["primary_reviewer"], dry_run=dry_run),
+            CandidateVoter(roles["peer_reviewer"], dry_run=dry_run),
+            CandidateVoter(roles["final_judge"], dry_run=dry_run),
+        ]
         self.html_patcher = HtmlPatcher()
         self.audit_writer = AuditWriter(output_root)
         self.evidence_builder = EvidenceBuilder(
@@ -87,28 +91,25 @@ class RepairPipeline:
                 issue_count += 1
 
                 evidence = self.evidence_builder.build(issue)
-                linked_patch = None
+                candidate_votes = []
                 try:
                     primary = self.primary_reviewer.review(evidence)
                     evidence = self.evidence_builder.enrich_with_review_crops(evidence, [primary])
                     peer = self.peer_reviewer.review(evidence, primary)
                     evidence = self.evidence_builder.enrich_with_review_crops(evidence, [primary, peer])
                     final_judge = self.final_judge.review(evidence, primary, peer)
-                    patch_plan = build_patch_plan(issue, final_judge)
-                    if (
-                        not patch_plan.should_modify
-                        and final_judge.final_decision != "false_positive"
-                        and primary.is_real_error
-                        and peer.is_real_error
-                    ):
-                        linked_patch = self.linked_patch_resolver.review(evidence, primary, peer, final_judge)
-                        patch_plan = build_patch_plan(
-                            issue,
-                            final_judge,
-                            primary=primary,
-                            peer=peer,
-                            linked_patch=linked_patch,
-                        )
+                    for voter in self.candidate_voters:
+                        try:
+                            candidate_votes.append(voter.vote(evidence, primary, peer, final_judge))
+                        except Exception:
+                            continue
+                    patch_plan = build_patch_plan(
+                        issue,
+                        final_judge,
+                        primary=primary,
+                        peer=peer,
+                        candidate_votes=candidate_votes,
+                    )
                 except Exception as exc:
                     primary = ReviewResult(
                         role="primary_reviewer",
@@ -127,19 +128,19 @@ class RepairPipeline:
                         should_modify_html=False,
                         reason=f"模型调用失败：{exc}",
                     )
-                    patch_plan = build_patch_plan(issue, final_judge)
+                    patch_plan = build_patch_plan(issue, final_judge, candidate_votes=[])
 
                 output_html_path = self.audit_writer.corrected_dir / issue.case_name / issue.html_path.name
                 patch_result = self.html_patcher.apply(patch_plan, output_html_path)
                 patch_results.append(patch_result)
 
                 if not patch_result.modified:
-                    if final_judge.final_decision == "false_positive":
+                    if patch_plan.classification == "false_positive":
                         false_positive_items.append(
                             FalsePositiveItem(
                                 case_name=issue.case_name,
                                 page_number=issue.page_number,
-                                reason=final_judge.reason or patch_result.message or "旧报告误报",
+                                reason=patch_result.message or patch_plan.reason or "旧报告误报",
                             )
                         )
                     else:
@@ -157,7 +158,6 @@ class RepairPipeline:
                     primary=primary,
                     peer=peer,
                     final_judge=final_judge,
-                    linked_patch=linked_patch,
                     patch_plan=patch_plan,
                     patch_result=patch_result,
                 )
